@@ -49,7 +49,7 @@ The AI supports:
 - Kannada
 - Tamil
 
-### Disease Scanner
+## Disease Scanner
 
 The Disease Scanner supports crop/leaf image input and sends image data to Gemini for AI-assisted analysis.
 
