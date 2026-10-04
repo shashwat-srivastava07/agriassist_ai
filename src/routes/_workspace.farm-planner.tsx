@@ -391,14 +391,28 @@ function FarmPlannerPage() {
 
   const onGenerate = async () => {
     if (
-      !form.crop ||
-      !form.state ||
-      !form.district ||
+      !form.crop.trim() ||
+      !form.state.trim() ||
+      !form.district.trim() ||
       !form.sowingDate
     ) {
       toast.error(
         t.fillRequired,
       );
+      return;
+    }
+
+    if (!Number.isFinite(form.landSizeAcres) || form.landSizeAcres <= 0) {
+      toast.error("Please enter a valid land size greater than 0.");
+      return;
+    }
+
+    const selectedDate = new Date(`${form.sowingDate}T00:00:00`);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (Number.isNaN(selectedDate.getTime()) || selectedDate < today) {
+      toast.error("Please select a valid sowing date.");
       return;
     }
 
@@ -859,6 +873,44 @@ function FarmPlannerPage() {
               />
             </Field>
           </div>
+
+          <Card className="mt-5 border-border/60 bg-white/[0.02]">
+            <CardContent className="p-4">
+              <h2 className="text-sm font-semibold">Farm Details Summary</h2>
+              <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                <div>
+                  <span className="text-muted-foreground">{t.crop}: </span>
+                  <span className="font-medium">{form.crop || "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">{t.state}: </span>
+                  <span className="font-medium">{form.state || "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">{t.district}: </span>
+                  <span className="font-medium">{form.district || "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">{t.landSize}: </span>
+                  <span className="font-medium">
+                    {form.landSizeAcres > 0 ? `${form.landSizeAcres} acres` : "—"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">{t.soilType}: </span>
+                  <span className="font-medium">{form.soilType || "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">{t.irrigationSource}: </span>
+                  <span className="font-medium">{form.irrigationSource || "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">{t.sowingDate}: </span>
+                  <span className="font-medium">{form.sowingDate || "—"}</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
 
           <div className="mt-5 flex flex-wrap items-center gap-3">
             <Button
