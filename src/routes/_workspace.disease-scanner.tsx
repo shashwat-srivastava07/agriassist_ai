@@ -1,0 +1,1139 @@
+import { createFileRoute } from "@tanstack/react-router";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { useServerFn } from "@tanstack/react-start";
+import {
+  UploadCloud,
+  Camera,
+  ImageIcon,
+  Sparkles,
+  X,
+  AlertCircle,
+  Loader2,
+  Trash2,
+  Leaf,
+  Send,
+  MessageCircle,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+} from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/lib/utils";
+import {
+  runDiseaseAgent,
+} from "@/lib/agents/disease-agent.functions";
+import {
+  askDiseaseFollowup,
+} from "@/lib/agents/disease-followup.functions";
+import { Input } from "@/components/ui/input";
+import {
+  listDiseaseScans,
+  saveDiseaseScan,
+  deleteDiseaseScan,
+  type DiseaseScanRow,
+} from "@/lib/disease-scans.functions";
+import {
+  BlockRenderer,
+} from "@/components/agriassist/chat/RichCards";
+import type { Block } from "@/lib/chat-mocks";
+import type { JsonValue } from "@/lib/agents/types";
+import { useLanguage } from "@/context/LanguageContext";
+import { getTranslations } from "@/lib/i18n";
+
+export const Route = createFileRoute(
+  "/_workspace/disease-scanner",
+)({
+  component: DiseaseScanner,
+});
+
+function fileToDataUrl(
+  file: File,
+): Promise<string> {
+  return new Promise(
+    (resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onloadend = () =>
+        resolve(
+          reader.result as string,
+        );
+
+      reader.onerror = reject;
+
+      reader.readAsDataURL(file);
+    },
+  );
+}
+
+function formatWhen(
+  iso: string,
+): string {
+  const d = new Date(iso);
+  const now = new Date();
+
+  const diffMs =
+    now.getTime() -
+    d.getTime();
+
+  const day =
+    24 *
+    60 *
+    60 *
+    1000;
+
+  if (
+    diffMs < day &&
+    d.getDate() ===
+      now.getDate()
+  ) {
+    return `Today, ${d.toLocaleTimeString(
+      [],
+      {
+        hour: "2-digit",
+        minute: "2-digit",
+      },
+    )}`;
+  }
+
+  if (diffMs < 2 * day) {
+    return "Yesterday";
+  }
+
+  return d.toLocaleDateString();
+}
+
+function extractVisionBlock(
+  blocks: JsonValue[],
+): Record<
+  string,
+  JsonValue
+> | null {
+  for (const b of blocks) {
+    if (
+      b &&
+      typeof b === "object" &&
+      !Array.isArray(b)
+    ) {
+      const obj =
+        b as Record<
+          string,
+          JsonValue
+        >;
+
+      if (
+        obj.kind ===
+        "diseaseVision"
+      ) {
+        return obj;
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildDiagnosisContext(
+  v: Record<
+    string,
+    JsonValue
+  > | null,
+): string {
+  if (!v) return "";
+
+  const asList = (
+    x: JsonValue,
+  ): string =>
+    Array.isArray(x)
+      ? x
+          .map(
+            (i) =>
+              `- ${String(i)}`,
+          )
+          .join("\n")
+      : "";
+
+  const lines = [
+    `Disease: ${String(
+      v.diseaseName ??
+        "Unknown",
+    )}`,
+
+    `Confidence: ${String(
+      v.confidence ?? "?",
+    )}%`,
+
+    `Severity: ${String(
+      v.severity ??
+        "Unknown",
+    )}`,
+
+    `Emergency: ${String(
+      v.emergencyLevel ??
+        "Low",
+    )}`,
+
+    v.possibleCause
+      ? `Cause: ${String(
+          v.possibleCause,
+        )}`
+      : "",
+
+    asList(v.symptoms) &&
+      `Symptoms:\n${asList(
+        v.symptoms,
+      )}`,
+
+    asList(
+      v.organicTreatment,
+    ) &&
+      `Organic treatment:\n${asList(
+        v.organicTreatment,
+      )}`,
+
+    asList(
+      v.chemicalTreatment,
+    ) &&
+      `Chemical treatment:\n${asList(
+        v.chemicalTreatment,
+      )}`,
+
+    asList(
+      v.preventionTips,
+    ) &&
+      `Prevention:\n${asList(
+        v.preventionTips,
+      )}`,
+  ].filter(Boolean);
+
+  return lines.join("\n");
+}
+
+interface ChatTurn {
+  role:
+    | "user"
+    | "assistant";
+  content: string;
+}
+
+function DiseaseScanner() {
+  const { language } =
+    useLanguage();
+
+  const t =
+    getTranslations(
+      language,
+    );
+
+  const [
+    file,
+    setFile,
+  ] = useState<File | null>(
+    null,
+  );
+
+  const [
+    preview,
+    setPreview,
+  ] = useState<
+    string | null
+  >(null);
+
+  const [
+    drag,
+    setDrag,
+  ] = useState(false);
+
+  const [
+    loading,
+    setLoading,
+  ] = useState(false);
+
+  const [
+    error,
+    setError,
+  ] = useState<
+    string | null
+  >(null);
+
+  const [
+    intro,
+    setIntro,
+  ] = useState<
+    string | null
+  >(null);
+
+  const [
+    blocks,
+    setBlocks,
+  ] = useState<Block[]>(
+    [],
+  );
+
+  const [
+    history,
+    setHistory,
+  ] = useState<
+    DiseaseScanRow[]
+  >([]);
+
+  const [
+    historyLoading,
+    setHistoryLoading,
+  ] = useState(true);
+
+  const [
+    selected,
+    setSelected,
+  ] = useState<
+    DiseaseScanRow | null
+  >(null);
+
+  // Follow-up chat state
+  const [
+    chatMessages,
+    setChatMessages,
+  ] = useState<ChatTurn[]>(
+    [],
+  );
+
+  const [
+    chatInput,
+    setChatInput,
+  ] = useState("");
+
+  const [
+    chatSending,
+    setChatSending,
+  ] = useState(false);
+
+  const [
+    diagImageUrl,
+    setDiagImageUrl,
+  ] = useState<
+    string | null
+  >(null);
+
+  const [
+    diagContext,
+    setDiagContext,
+  ] = useState("");
+
+  const fileInputRef =
+    useRef<HTMLInputElement | null>(
+      null,
+    );
+
+  const cameraInputRef =
+    useRef<HTMLInputElement | null>(
+      null,
+    );
+
+  const diseaseFn =
+    useServerFn(
+      runDiseaseAgent,
+    );
+
+  const followupFn =
+    useServerFn(
+      askDiseaseFollowup,
+    );
+
+  const listFn =
+    useServerFn(
+      listDiseaseScans,
+    );
+
+  const saveFn =
+    useServerFn(
+      saveDiseaseScan,
+    );
+
+  const deleteFn =
+    useServerFn(
+      deleteDiseaseScan,
+    );
+
+  const refreshHistory =
+    useCallback(
+      async () => {
+        try {
+          const rows =
+            await listFn();
+
+          setHistory(rows);
+        } catch (e) {
+          console.error(
+            "Failed to load history",
+            e,
+          );
+        } finally {
+          setHistoryLoading(
+            false,
+          );
+        }
+      },
+      [listFn],
+    );
+
+  useEffect(() => {
+    void refreshHistory();
+  }, [refreshHistory]);
+
+  const handleFile =
+    useCallback(
+      (f: File | null) => {
+        setFile(f);
+        setBlocks([]);
+        setIntro(null);
+        setError(null);
+        setChatMessages([]);
+        setChatInput("");
+        setDiagImageUrl(null);
+        setDiagContext("");
+
+        if (f) {
+          setPreview(
+            URL.createObjectURL(
+              f,
+            ),
+          );
+        } else {
+          setPreview(null);
+        }
+      },
+      [],
+    );
+
+  const handleDiagnose =
+    useCallback(
+      async () => {
+        setError(null);
+        setBlocks([]);
+        setIntro(null);
+        setChatMessages([]);
+        setChatInput("");
+
+        if (!file) {
+          setError(
+            t.uploadClearPhoto,
+          );
+          return;
+        }
+
+        setLoading(true);
+
+        try {
+          const imageUrl =
+            await fileToDataUrl(
+              file,
+            );
+
+          const response =
+            await diseaseFn({
+              data: {
+                message:
+                  "Please diagnose this crop image.",
+                imageUrl,
+                language,
+              },
+            });
+
+          const respBlocks =
+            (response.blocks ??
+              []) as JsonValue[];
+
+          setIntro(
+            response.content ??
+              null,
+          );
+
+          setBlocks(
+            respBlocks as unknown as Block[],
+          );
+
+          const vision =
+            extractVisionBlock(
+              respBlocks,
+            );
+
+          setDiagImageUrl(
+            imageUrl,
+          );
+
+          setDiagContext(
+            buildDiagnosisContext(
+              vision,
+            ),
+          );
+
+          if (vision) {
+            try {
+              await saveFn({
+                data: {
+                  diseaseName:
+                    String(
+                      vision.diseaseName ??
+                        "Unclear diagnosis",
+                    ),
+
+                  severity:
+                    (vision.severity as string) ??
+                    null,
+
+                  confidence:
+                    typeof vision.confidence ===
+                    "number"
+                      ? vision.confidence
+                      : null,
+
+                  emergencyLevel:
+                    (vision.emergencyLevel as string) ??
+                    null,
+
+                  intro:
+                    response.content ??
+                    null,
+
+                  blocks:
+                    respBlocks,
+
+                  imageDataUrl:
+                    imageUrl,
+                },
+              });
+
+              void refreshHistory();
+            } catch (
+              saveErr
+            ) {
+              console.error(
+                "Failed to save scan",
+                saveErr,
+              );
+            }
+          }
+        } catch (e) {
+          console.error(e);
+
+          setError(
+            e instanceof Error
+              ? e.message
+              : "Something went wrong. Please try again.",
+          );
+        } finally {
+          setLoading(false);
+        }
+      },
+      [
+        file,
+        diseaseFn,
+        saveFn,
+        refreshHistory,
+        t.uploadClearPhoto,
+      ],
+    );
+
+  const handleSendChat =
+    useCallback(
+      async () => {
+        const q =
+          chatInput.trim();
+
+        if (
+          !q ||
+          chatSending
+        ) {
+          return;
+        }
+
+        const nextHistory: ChatTurn[] =
+          [
+            ...chatMessages,
+            {
+              role: "user",
+              content: q,
+            },
+          ];
+
+        setChatMessages(
+          nextHistory,
+        );
+
+        setChatInput("");
+        setChatSending(true);
+
+        try {
+          const res =
+            await followupFn({
+              data: {
+                question: q,
+                imageUrl:
+                  diagImageUrl ??
+                  undefined,
+                diagnosisContext:
+                  diagContext ||
+                  undefined,
+                history:
+                  chatMessages.slice(
+                    -8,
+                  ),
+              },
+            });
+
+          setChatMessages([
+            ...nextHistory,
+            {
+              role: "assistant",
+              content:
+                res.content,
+            },
+          ]);
+        } catch (e) {
+          console.error(e);
+
+          setChatMessages([
+            ...nextHistory,
+            {
+              role: "assistant",
+              content:
+                e instanceof Error
+                  ? `Sorry — ${e.message}`
+                  : "Sorry, something went wrong.",
+            },
+          ]);
+        } finally {
+          setChatSending(
+            false,
+          );
+        }
+      },
+      [
+        chatInput,
+        chatSending,
+        chatMessages,
+        followupFn,
+        diagImageUrl,
+        diagContext,
+      ],
+    );
+
+  const handleDelete =
+    useCallback(
+      async (id: string) => {
+        try {
+          await deleteFn({
+            data: { id },
+          });
+
+          setHistory((h) =>
+            h.filter(
+              (r) => r.id !== id,
+            ),
+          );
+
+          if (
+            selected?.id === id
+          ) {
+            setSelected(null);
+          }
+        } catch (e) {
+          console.error(
+            "Failed to delete scan",
+            e,
+          );
+        }
+      },
+      [deleteFn, selected],
+    );
+
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-8 md:px-6 md:py-10">
+      <header className="mb-6">
+        <h1 className="font-display text-2xl font-semibold tracking-tight md:text-3xl">
+          {t.diseaseScannerTitle}
+        </h1>
+
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t.diseaseScannerDescription}
+        </p>
+      </header>
+
+      <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
+        <Card className="glass border-0">
+          <CardContent className="p-5">
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDrag(true);
+              }}
+              onDragLeave={() =>
+                setDrag(false)
+              }
+              onDrop={(e) => {
+                e.preventDefault();
+                setDrag(false);
+
+                const f =
+                  e.dataTransfer
+                    .files?.[0];
+
+                if (f) {
+                  handleFile(f);
+                }
+              }}
+              onClick={() => {
+                if (!preview) {
+                  fileInputRef.current?.click();
+                }
+              }}
+              className={cn(
+                "relative flex min-h-[320px] cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center transition-colors",
+                drag
+                  ? "border-accent bg-accent/5"
+                  : "border-border hover:border-accent/60 hover:bg-white/[0.02]",
+              )}
+            >
+              {preview ? (
+                <>
+                  <img
+                    src={preview}
+                    alt={t.preview}
+                    className="max-h-72 rounded-lg object-contain"
+                  />
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mt-3"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleFile(null);
+                    }}
+                  >
+                    <X className="mr-1.5 h-4 w-4" />
+                    {t.remove}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <div className="rounded-full bg-gradient-primary p-3 shadow-glow">
+                    <UploadCloud className="h-6 w-6 text-primary-foreground" />
+                  </div>
+
+                  <div className="mt-4 font-medium">
+                    {t.dragDropImage}
+                  </div>
+
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {t.imageLimit}
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap justify-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        fileInputRef.current?.click();
+                      }}
+                    >
+                      <ImageIcon className="mr-1.5 h-4 w-4" />
+                      {t.browse}
+                    </Button>
+
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        cameraInputRef.current?.click();
+                      }}
+                    >
+                      <Camera className="mr-1.5 h-4 w-4" />
+                      {t.camera}
+                    </Button>
+                  </div>
+                </>
+              )}
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="sr-only"
+                onChange={(e) => {
+                  handleFile(
+                    e.target.files?.[0] ??
+                      null,
+                  );
+
+                  e.target.value = "";
+                }}
+              />
+
+              <input
+                ref={cameraInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="sr-only"
+                onChange={(e) => {
+                  handleFile(
+                    e.target.files?.[0] ??
+                      null,
+                  );
+
+                  e.target.value = "";
+                }}
+              />
+            </div>
+
+            <Button
+              onClick={handleDiagnose}
+              className="mt-4 w-full bg-gradient-primary text-primary-foreground shadow-glow"
+              disabled={!file || loading}
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {t.diagnosing}
+                </>
+              ) : (
+                <>
+                  <Sparkles className="mr-2 h-4 w-4" />
+                  {t.diagnoseWithAI}
+                </>
+              )}
+            </Button>
+
+            {!file &&
+              !loading && (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  {t.uploadClearPhoto}
+                </p>
+              )}
+
+            {error && (
+              <div className="mt-4 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  {error}
+                </span>
+              </div>
+            )}
+
+            {(intro ||
+              blocks.length > 0) && (
+              <div className="mt-5 space-y-4">
+                {intro && (
+                  <p className="text-sm text-muted-foreground">
+                    {intro}
+                  </p>
+                )}
+
+                {blocks.map(
+                  (b, i) => (
+                    <BlockRenderer
+                      key={i}
+                      block={b}
+                      onFollowup={() => {}}
+                    />
+                  ),
+                )}
+              </div>
+            )}
+
+            {diagContext && (
+              <div className="mt-6 rounded-xl border border-border/60 bg-white/[0.02] p-4">
+                <div className="mb-3 flex items-center gap-2">
+                  <MessageCircle className="h-4 w-4 text-accent" />
+
+                  <h3 className="text-sm font-semibold">
+                    {t.askDiagnosis}
+                  </h3>
+                </div>
+
+                <p className="mb-3 text-xs text-muted-foreground">
+                  {t.followupDescription}
+                </p>
+
+                {chatMessages.length >
+                  0 && (
+                  <ScrollArea className="mb-3 max-h-72 pr-2">
+                    <div className="space-y-3">
+                      {chatMessages.map(
+                        (m, i) => (
+                          <div
+                            key={i}
+                            className={cn(
+                              "rounded-lg px-3 py-2 text-sm",
+                              m.role ===
+                                "user"
+                                ? "ml-auto max-w-[85%] bg-primary text-primary-foreground"
+                                : "mr-auto max-w-[90%] bg-white/[0.04] text-foreground",
+                            )}
+                          >
+                            <div className="whitespace-pre-wrap leading-relaxed">
+                              {m.content}
+                            </div>
+                          </div>
+                        ),
+                      )}
+
+                      {chatSending && (
+                        <div className="mr-auto flex max-w-[90%] items-center gap-2 rounded-lg bg-white/[0.04] px-3 py-2 text-sm text-muted-foreground">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          {t.thinking}
+                        </div>
+                      )}
+                    </div>
+                  </ScrollArea>
+                )}
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void handleSendChat();
+                  }}
+                  className="flex items-center gap-2"
+                >
+                  <Input
+                    value={chatInput}
+                    onChange={(e) =>
+                      setChatInput(
+                        e.target.value,
+                      )
+                    }
+                    placeholder={
+                      t.diagnosisPlaceholder
+                    }
+                    disabled={
+                      chatSending
+                    }
+                    className="flex-1"
+                  />
+
+                  <Button
+                    type="submit"
+                    size="icon"
+                    disabled={
+                      !chatInput.trim() ||
+                      chatSending
+                    }
+                    className="bg-gradient-primary text-primary-foreground shadow-glow"
+                    aria-label={t.send}
+                  >
+                    {chatSending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Send className="h-4 w-4" />
+                    )}
+                  </Button>
+                </form>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="glass border-0">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <h2 className="font-display text-base font-semibold">
+                {t.recentDiagnoses}{" "}
+                {history.length >
+                  0 && (
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    ({history.length})
+                  </span>
+                )}
+              </h2>
+
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  void refreshHistory()
+                }
+              >
+                {t.refresh}
+              </Button>
+            </div>
+
+            {historyLoading ? (
+              <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {t.loadingHistory}
+              </div>
+            ) : history.length ===
+              0 ? (
+              <div className="mt-4 rounded-lg border border-dashed border-border/60 p-6 text-center text-sm text-muted-foreground">
+                <Leaf className="mx-auto mb-2 h-5 w-5 opacity-60" />
+
+                {t.noDiagnoses}
+              </div>
+            ) : (
+              <ScrollArea className="mt-3 h-[420px] pr-2">
+                <div className="space-y-2">
+                  {history.map(
+                    (r) => (
+                      <div
+                        key={r.id}
+                        className="group flex items-center justify-between rounded-lg border border-border/60 bg-white/[0.02] p-3 transition-colors hover:border-accent/60 hover:bg-white/[0.04]"
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSelected(r)
+                          }
+                          className="flex flex-1 items-center gap-3 text-left"
+                        >
+                          {r.imageDataUrl ? (
+                            <img
+                              src={
+                                r.imageDataUrl
+                              }
+                              alt={
+                                r.diseaseName
+                              }
+                              className="h-10 w-10 shrink-0 rounded-md object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-white/[0.04]">
+                              <Leaf className="h-4 w-4 text-muted-foreground" />
+                            </div>
+                          )}
+
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium">
+                              {
+                                r.diseaseName
+                              }
+
+                              {typeof r.confidence ===
+                                "number" && (
+                                <span className="ml-1 text-xs text-muted-foreground">
+                                  ·{" "}
+                                  {
+                                    r.confidence
+                                  }
+                                  %
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="text-xs text-muted-foreground">
+                              {formatWhen(
+                                r.createdAt,
+                              )}
+
+                              {r.severity
+                                ? ` · ${r.severity}`
+                                : ""}
+                            </div>
+                          </div>
+                        </button>
+
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDelete(
+                              r.id,
+                            );
+                          }}
+                          aria-label={
+                            t.delete
+                          }
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ),
+                  )}
+                </div>
+              </ScrollArea>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Dialog
+        open={!!selected}
+        onOpenChange={(open) =>
+          !open &&
+          setSelected(null)
+        }
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>
+              {selected?.diseaseName ??
+                t.diagnosis}
+            </DialogTitle>
+          </DialogHeader>
+
+          {selected && (
+            <ScrollArea className="max-h-[70vh] pr-4">
+              <div className="space-y-4">
+                <div className="text-xs text-muted-foreground">
+                  {formatWhen(
+                    selected.createdAt,
+                  )}
+                </div>
+
+                {selected.imageDataUrl && (
+                  <img
+                    src={
+                      selected.imageDataUrl
+                    }
+                    alt={
+                      selected.diseaseName
+                    }
+                    className="max-h-72 w-full rounded-lg object-contain"
+                  />
+                )}
+
+                {selected.intro && (
+                  <p className="text-sm text-muted-foreground">
+                    {
+                      selected.intro
+                    }
+                  </p>
+                )}
+
+                {(
+                  selected.blocks as unknown as Block[]
+                ).map(
+                  (b, i) => (
+                    <BlockRenderer
+                      key={i}
+                      block={b}
+                      onFollowup={() => {}}
+                    />
+                  ),
+                )}
+              </div>
+            </ScrollArea>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
