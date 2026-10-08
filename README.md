@@ -606,7 +606,7 @@ See [`LICENSE`](./LICENSE) for the complete license text.
 
 ---
 
-## Project Status
+## Project Status:
 
 AgriAssist AI currently provides a working full-stack agriculture workspace with:
 
